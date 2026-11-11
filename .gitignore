@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+.idea/
+*.iml
+.vscode/
+data/
+*.log
+.env
+gateway/src/main/resources/static/

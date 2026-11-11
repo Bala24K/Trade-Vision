@@ -1,0 +1,14 @@
+services:
+  tradevision:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - tradevision-data:/data   # journal + snapshots + catalog survive restarts
+    environment:
+      TRADEVISION_SYNC_POLICY: EVERY_BATCH   # fsync per batch in a deployed instance
+      TRADEVISION_ADMIN_TOKEN: change-me
+    restart: unless-stopped
+
+volumes:
+  tradevision-data:

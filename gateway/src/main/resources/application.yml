@@ -1,0 +1,28 @@
+server:
+  port: 8080
+  compression:
+    enabled: true
+
+spring:
+  main:
+    banner-mode: off
+
+tradevision:
+  data-dir: ./data
+  # EVERY_BATCH = fsync per journal batch (no acknowledged order is ever lost); OS_CACHE = survive process crashes only.
+  sync-policy: OS_CACHE
+  snapshot-every: 250000
+  busy-spin: false
+  admin-token: change-me
+  starting-balance-dollars: 10000
+  bots:
+    enabled: true
+  polymarket:
+    enabled: true
+    markets: 8
+    rest-url: https://clob.polymarket.com
+    ws-url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+
+logging:
+  level:
+    io.tradevision: INFO
