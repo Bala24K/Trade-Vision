@@ -165,7 +165,10 @@ export interface Toast {
   text: string;
 }
 
+export type View = 'trade' | 'analytics' | 'leaderboard';
+
 interface UiState {
+  view: View;
   selected: number | null;
   ticketOutcome: Outcome;
   ticketAction: Action;
@@ -174,6 +177,7 @@ interface UiState {
   ticketQty: string;
   toasts: Toast[];
   select: (id: number) => void;
+  setView: (v: View) => void;
   setTicket: (p: Partial<Pick<UiState, 'ticketOutcome' | 'ticketAction' | 'ticketType' | 'ticketPrice' | 'ticketQty'>>) => void;
   toast: (kind: Toast['kind'], text: string) => void;
   dismiss: (id: number) => void;
@@ -181,7 +185,15 @@ interface UiState {
 
 let toastId = 0;
 
+/** Views are deep-linkable: #analytics, #leaderboard (default: trade). */
+function viewFromHash(): View {
+  if (typeof location === 'undefined') return 'trade';
+  const h = location.hash.replace('#', '');
+  return h === 'analytics' || h === 'leaderboard' ? h : 'trade';
+}
+
 export const useUi = create<UiState>((set) => ({
+  view: viewFromHash(),
   selected: null,
   ticketOutcome: 'YES',
   ticketAction: 'BUY',
@@ -190,6 +202,10 @@ export const useUi = create<UiState>((set) => ({
   ticketQty: '100',
   toasts: [],
   select: (selected) => set({ selected, ticketPrice: '' }),
+  setView: (view) => {
+    if (typeof history !== 'undefined') history.replaceState(null, '', view === 'trade' ? location.pathname : `#${view}`);
+    set({ view });
+  },
   setTicket: (p) => set(p),
   toast: (kind, text) => {
     const id = ++toastId;
@@ -200,3 +216,7 @@ export const useUi = create<UiState>((set) => ({
 }));
 
 export type { OrderResult };
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('hashchange', () => useUi.setState({ view: viewFromHash() }));
+}

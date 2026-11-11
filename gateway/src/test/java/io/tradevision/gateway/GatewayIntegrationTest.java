@@ -106,6 +106,26 @@ class GatewayIntegrationTest {
         assertEquals("REJECTED", broke.body().get("status").asText());
         assertEquals("INSUFFICIENT_FUNDS", broke.body().get("reason").asText());
 
+        // Cancel by the client's own id (no exchange order id needed).
+        Res resting = call("POST", "/api/orders", alice, order(m, "YES", "BUY", "LIMIT", 100, 5, 777));
+        assertEquals("OPEN", resting.body().get("status").asText());
+        assertEquals(200, call("DELETE", "/api/orders/client/777", alice, null).status());
+        assertEquals(404, call("DELETE", "/api/orders/client/777", alice, null).status(), "already canceled");
+        assertEquals(404, call("DELETE", "/api/orders/client/777", bob, null).status(), "ids are per account");
+
+        // Without databases, analytics and history are served from memory and say so.
+        JsonNode an = call("GET", "/api/analytics/markets/" + m + "?window=60", null, null).body();
+        assertEquals("memory", an.get("source").asText());
+        assertEquals(1, an.get("metrics").get("trades").asLong());
+        assertEquals(600, an.get("metrics").get("vwap").asDouble(), 1e-9);
+        assertEquals(200, call("GET", "/api/analytics/scanner", null, null).status());
+        JsonNode lb = call("GET", "/api/analytics/leaderboard", null, null).body();
+        assertEquals("memory", lb.get("source").asText());
+        assertEquals(2, lb.get("rows").size());
+        JsonNode fh = call("GET", "/api/me/history/fills", bob, null).body();
+        assertEquals("memory", fh.get("source").asText());
+        assertEquals(1, fh.get("items").size());
+
         assertEquals(403, call("POST", "/api/admin/markets/" + m + "/halt", null, null).status());
         JsonNode sys = call("GET", "/api/system", null, null).body();
         assertTrue(sys.get("durableSequence").asLong() >= sys.get("commandsProcessed").asLong() - 1);

@@ -1,14 +1,75 @@
+# One command: docker compose up --build   ->  http://localhost:8080
+#
+# tradevision  engine + gateway + React terminal (one JVM). Source of truth: the journal in the tradevision-data volume.
+# postgres     relational projection: orders, fills, positions, balances (history + leaderboard)
+# clickhouse   columnar projection: trades + 1 Hz book samples (analytics)
+#
+# Both databases are projections: stop either one and the exchange keeps trading; it catches up when they return.
 services:
   tradevision:
     build: .
     ports:
       - "8080:8080"
     volumes:
-      - tradevision-data:/data   # journal + snapshots + catalog survive restarts
+      - tradevision-data:/data
     environment:
-      TRADEVISION_SYNC_POLICY: EVERY_BATCH   # fsync per batch in a deployed instance
-      TRADEVISION_ADMIN_TOKEN: change-me
+      TRADEVISION_SYNC_POLICY: EVERY_BATCH          # fsync per journal batch in a deployed instance
+      TRADEVISION_ADMIN_TOKEN: ${TRADEVISION_ADMIN_TOKEN:-change-me}
+      TRADEVISION_POSTGRES_ENABLED: "true"
+      TRADEVISION_POSTGRES_URL: jdbc:postgresql://postgres:5432/tradevision
+      TRADEVISION_POSTGRES_USER: tradevision
+      TRADEVISION_POSTGRES_PASSWORD: tradevision
+      TRADEVISION_CLICKHOUSE_ENABLED: "true"
+      TRADEVISION_CLICKHOUSE_URL: http://clickhouse:8123
+      TRADEVISION_CLICKHOUSE_USER: tradevision
+      TRADEVISION_CLICKHOUSE_PASSWORD: tradevision
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_DB: tradevision
+      POSTGRES_USER: tradevision
+      POSTGRES_PASSWORD: tradevision
+    ports:
+      - "5432:5432"   # optional: inspect with psql -h localhost -U tradevision
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradevision -d tradevision"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8.8.17-alpine
+    environment:
+      CLICKHOUSE_DB: tradevision
+      CLICKHOUSE_USER: tradevision
+      CLICKHOUSE_PASSWORD: tradevision
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"   # optional: HTTP interface / play UI at http://localhost:8123/play
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      # 127.0.0.1, not localhost: inside this image localhost resolves to ::1 while the server listens on IPv4.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
+      start_period: 30s
+      interval: 2s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
 volumes:
   tradevision-data:
+  postgres-data:
+  clickhouse-data:

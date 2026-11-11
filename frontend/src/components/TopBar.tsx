@@ -2,7 +2,22 @@ import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { usd, pnlClass } from '../lib/format';
 import type { SystemStats } from '../lib/types';
-import { useAccount, useConn, useMarkets } from '../stores/stores';
+import { useAccount, useConn, useMarkets, useUi, type View } from '../stores/stores';
+
+function Nav() {
+  const view = useUi((s) => s.view);
+  const items: [View, string, string][] = [['trade', 'Trade', 'T'], ['analytics', 'Analytics', 'A'], ['leaderboard', 'Leaderboard', 'L']];
+  return (
+    <nav className="nav" aria-label="Views">
+      {items.map(([v, label, key]) => (
+        <button key={v} className={`navb ${view === v ? 'on' : ''}`} onClick={() => useUi.getState().setView(v)}
+                aria-current={view === v ? 'page' : undefined} title={`${label} (Alt+${key})`}>
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+}
 
 function useLivePnl() {
   // Positions come from the server; marks come from live tickers, so PnL moves with the market between refreshes.
@@ -73,6 +88,22 @@ function SystemPopover() {
             <span>Queue depth in / out</span><b>{s.inboundQueueDepth} / {s.outboundQueueDepth}</b>
             <span>WebSocket clients</span><b>{s.websocketClients}</b>
           </div>
+          <h4>Durability</h4>
+          <div className="kv">
+            <span>Snapshots</span><b>{s.snapshots?.mode === 'FOLLOWER' ? `follower @ ${s.snapshots.lastSnapshotSequence.toLocaleString()} (${s.snapshots.lastSnapshotMillis} ms)` : 'inline'}</b>
+          </div>
+          <h4>Projections</h4>
+          <div className="kv">
+            <span>Postgres</span>
+            <b className={s.postgres ? (s.postgres.status.state === 'UP' ? 'up' : 'down') : 'dim'}>
+              {s.postgres ? `${s.postgres.status.state.toLowerCase()} · lag ${s.postgres.lag}` : 'disabled'}
+            </b>
+            {s.postgres && <><span>Rows written / gaps</span><b>{s.postgres.status.rows.toLocaleString()} / {s.postgres.status.gaps}</b></>}
+            <span>ClickHouse</span>
+            <b className={s.clickhouse ? (s.clickhouse.up ? 'up' : 'down') : 'dim'}>
+              {s.clickhouse ? (s.clickhouse.up ? `up · ${s.clickhouse.tradesWritten.toLocaleString()} trades` : 'down') : 'disabled'}
+            </b>
+          </div>
           <h4>Polymarket feed</h4>
           <div className="kv">
             <span>Status</span><b className={s.polymarket.connected ? 'up' : 'down'}>{s.polymarket.enabled ? (s.polymarket.connected ? 'connected' : 'disconnected') : 'disabled'}</b>
@@ -95,6 +126,7 @@ export function TopBar() {
         <span className="brand-mark" />
         TradeVision <small>paper terminal</small>
       </div>
+      <Nav />
       <ConnectionPill />
       <SystemPopover />
       <span className="spacer" />

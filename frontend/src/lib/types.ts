@@ -137,6 +137,9 @@ export interface SystemStats {
   ingressToAppliedMicros: Hist;
   ingressToDurableMicros: Hist;
   websocketClients: number;
+  snapshots?: { mode: 'INLINE' } | { mode: 'FOLLOWER'; followerSequence: number; lastSnapshotSequence: number; lastSnapshotMillis: number; taken: number };
+  postgres?: ProjectionStatus;
+  clickhouse?: ClickHouseStatus;
   polymarket: {
     enabled: boolean;
     connected: boolean;
@@ -157,4 +160,137 @@ export interface Hist {
   p999: number;
   max: number;
   count: number;
+}
+
+// ---------------------------------------------------------------- analytics (phase 9)
+
+export interface Metrics {
+  trades: number;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+  buyShare: number | null;
+  vwap: number | null; // ticks
+  open: number | null;
+  last: number | null;
+  high: number | null;
+  low: number | null;
+  avgTradeSize: number | null;
+  realizedVolCentsPerHour: number | null;
+  avgSpread: number | null; // ticks
+  avgImbalance: number | null; // -1..1
+  refBasisCents: number | null;
+  buckets: number;
+}
+
+export interface LiveBook {
+  bestBid: number | null;
+  bestAsk: number | null;
+  spread: number | null;
+  bidDepth5: number;
+  askDepth5: number;
+  imbalance: number | null;
+  refMid: number | null;
+  mark: number;
+}
+
+export interface BucketDto {
+  t: number; // epoch seconds
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+  trades: number;
+  vwap: number | null;
+  spread: number | null;
+  imbalance: number | null;
+  refMid: number | null;
+}
+
+export interface MarketAnalytics {
+  marketId: number;
+  question: string;
+  source: string; // clickhouse | memory | memory (clickhouse unavailable)
+  windowMinutes: number;
+  bucketSeconds: number;
+  metrics: Metrics;
+  live: LiveBook;
+  buckets: BucketDto[];
+}
+
+export interface ScannerRow {
+  marketId: number;
+  question: string;
+  category: string;
+  marketSource: 'SYNTHETIC' | 'POLYMARKET';
+  metrics: Metrics;
+  live: LiveBook;
+}
+
+export interface LeaderRow {
+  rank: number;
+  accountId: number;
+  bot: boolean;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  totalPnl: number;
+  openPositions: number;
+}
+
+export interface Leaderboard {
+  source: string; // postgres | memory
+  rows: LeaderRow[];
+}
+
+export interface Page<T> {
+  source: string;
+  items: T[];
+  next: number | null;
+}
+
+/** Order row from the Postgres history endpoint. */
+export interface OrderRow {
+  orderId: number;
+  clientOrderId: number;
+  marketId: number;
+  outcome: Outcome;
+  action: Action;
+  tif: Tif;
+  limitPrice: number;
+  quantity: number;
+  filled: number;
+  avgPriceMilli: number;
+  status: OrderView['status'];
+  reason: string | null;
+  createdTs: number;
+  updatedTs: number;
+}
+
+export interface ProjectionStatus {
+  status: {
+    state: 'STARTING' | 'UP' | 'DOWN';
+    offset: number;
+    queued: number;
+    batches: number;
+    rows: number;
+    lastBatchMicros: number;
+    dropped: number;
+    gaps: number;
+    lastError: string | null;
+  };
+  lag: number;
+}
+
+export interface ClickHouseStatus {
+  up: boolean;
+  tradesWritten: number;
+  samplesWritten: number;
+  queued: number;
+  dropped: number;
+  rejectedRows: number;
+  lastFlushMicros: number;
+  lastError: string | null;
 }

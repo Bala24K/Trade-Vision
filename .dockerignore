@@ -1,0 +1,8 @@
+**/node_modules
+**/target
+data
+.git
+gateway/src/main/resources/static
+*.log
+.idea
+.vscode

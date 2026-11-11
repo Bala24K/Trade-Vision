@@ -10,6 +10,7 @@ import io.tradevision.engine.TimeInForce;
 import io.tradevision.engine.book.Order;
 import io.tradevision.engine.journal.Journal;
 import io.tradevision.engine.runtime.EngineRunner;
+import io.tradevision.engine.runtime.SnapshotFollower;
 import io.tradevision.engine.runtime.SequencedListener;
 
 import java.io.IOException;
@@ -34,6 +35,8 @@ import java.util.stream.Stream;
  * </ul>
  *
  * Usage: {@code java -cp benchmarks.jar io.tradevision.bench.LoadHarness [saturate|paced] [commands] [rate/s] [fsync|nosync]}
+ * <p>Snapshots: {@code -Dtv.snapshot=off|inline|follower} (default off) every {@code -Dtv.snapshotEvery} commands
+ * (default 500k): measures the matcher pause of an inline snapshot against the background follower.
  */
 public final class LoadHarness {
     public static void main(String[] args) throws Exception {
@@ -56,8 +59,13 @@ public final class LoadHarness {
             int presize = Integer.getInteger("tv.presize", 1 << 16);
             var engine = new MatchingEngine(listener, 1 << 20, presize);
             var journal = new Journal(dir.resolve("journal"), 256L << 20, sync);
+            String snapMode = System.getProperty("tv.snapshot", "off");
+            long snapEvery = Long.getLong("tv.snapshotEvery", 500_000);
             var runner = new EngineRunner(engine, journal, listener, () -> System.nanoTime() / 1000,
-                    dir.resolve("journal"), dir.resolve("snap"), 0, 1 << 16, 4096).start();
+                    dir.resolve("journal"), dir.resolve("snap"), snapMode.equals("inline") ? snapEvery : 0, 1 << 16, 4096).start();
+            SnapshotFollower follower = snapMode.equals("follower")
+                    ? new SnapshotFollower(dir.resolve("snap"), dir.resolve("journal"), runner::durableSequence, snapEvery).start()
+                    : null;
 
             for (int m = 1; m <= markets; m++) {
                 final long id = m;
@@ -128,9 +136,14 @@ public final class LoadHarness {
             while (runner.queueDepth() > 0) Thread.onSpinWait();
             long elapsed = System.nanoTime() - t0;
             runner.stop();
+            if (follower != null) follower.stop();
 
             long processed = runner.processed() - setupCommands;
-            System.out.printf("%n=== TradeVision load harness: %s, journal %s ===%n", mode, sync);
+            System.out.printf("%n=== TradeVision load harness: %s, journal %s, snapshots %s ===%n", mode, sync, snapMode);
+            if (follower != null) {
+                System.out.printf("follower          %,d snapshots, last took %,d ms (off the matching thread)%n",
+                        follower.snapshotsTaken(), follower.lastSnapshotMillis());
+            }
             System.out.printf("commands          %,d in %.2fs -> %,.0f cmd/s%n", processed, elapsed / 1e9, processed / (elapsed / 1e9));
             System.out.printf("trades            %,d%n", trades.get());
             System.out.printf("journal           %,d flushes, avg batch %.1f cmds, %,d MB%n", runner.journalFlushes(),

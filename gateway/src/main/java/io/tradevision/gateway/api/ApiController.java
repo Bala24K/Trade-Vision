@@ -7,11 +7,15 @@ import io.tradevision.engine.runtime.LatencyHistogram;
 import io.tradevision.gateway.TvProperties;
 import io.tradevision.gateway.engine.EngineHost;
 import io.tradevision.gateway.engine.Event;
+import io.tradevision.gateway.analytics.ClickHouseAnalytics;
 import io.tradevision.gateway.ingest.PolymarketFeed;
+import io.tradevision.gateway.projection.PostgresProjector;
+import io.tradevision.gateway.projection.PostgresQueries;
 import io.tradevision.gateway.read.AccountState;
 import io.tradevision.gateway.read.MarketState;
 import io.tradevision.gateway.read.ReadModel;
 import io.tradevision.gateway.ws.MarketDataHub;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -43,9 +47,17 @@ public class ApiController {
     private final MarketDataHub hub;
     private final TvProperties props;
     private final RateMeter rate;
+    private final ObjectProvider<PostgresProjector> pgProjector;
+    private final ObjectProvider<PostgresQueries> pgQueries;
+    private final ObjectProvider<ClickHouseAnalytics> clickhouse;
 
     public ApiController(EngineHost engine, ReadModel readModel, MarketViews views, OrderService orders, AuthService auth,
-                         PolymarketFeed polymarket, MarketDataHub hub, TvProperties props, RateMeter rate) {
+                         PolymarketFeed polymarket, MarketDataHub hub, TvProperties props, RateMeter rate,
+                         ObjectProvider<PostgresProjector> pgProjector, ObjectProvider<PostgresQueries> pgQueries,
+                         ObjectProvider<ClickHouseAnalytics> clickhouse) {
+        this.pgProjector = pgProjector;
+        this.pgQueries = pgQueries;
+        this.clickhouse = clickhouse;
         this.engine = engine;
         this.readModel = readModel;
         this.views = views;
@@ -122,6 +134,56 @@ public class ApiController {
         return a == null ? List.of() : a.fills(200);
     }
 
+    public record Page<T>(String source, List<T> items, Long next) {}
+
+    /**
+     * Complete fill history, newest first, keyset-paginated: pass the returned {@code next} as {@code before}.
+     * Served from Postgres when the projection is enabled; otherwise only the recent in-memory window exists.
+     */
+    @GetMapping("/me/history/fills")
+    public Page<?> fillHistory(@RequestHeader(value = "Authorization", required = false) String authz,
+                               @RequestParam(required = false) Long before,
+                               @RequestParam(defaultValue = "50") int limit) {
+        long acct = account(authz);
+        long b = before == null ? Long.MAX_VALUE : before;
+        int n = Math.max(1, Math.min(limit, 500));
+        PostgresQueries pg = pgQueries.getIfAvailable();
+        if (pg != null) {
+            try {
+                var rows = pg.fills(acct, b, n);
+                return new Page<>("postgres", rows, rows.size() < n ? null : rows.get(rows.size() - 1).tradeId());
+            } catch (RuntimeException e) {
+                // database unavailable: fall through to the in-memory window
+            }
+        }
+        AccountState a = readModel.account(acct);
+        var rows = a == null ? List.<AccountState.Fill>of()
+                : a.fills(300).stream().filter(f -> f.tradeId() < b).limit(n).toList();
+        return new Page<>("memory", rows, rows.size() < n ? null : rows.get(rows.size() - 1).tradeId());
+    }
+
+    @GetMapping("/me/history/orders")
+    public Page<?> orderHistory(@RequestHeader(value = "Authorization", required = false) String authz,
+                                @RequestParam(required = false) Long before,
+                                @RequestParam(defaultValue = "50") int limit) {
+        long acct = account(authz);
+        long b = before == null ? Long.MAX_VALUE : before;
+        int n = Math.max(1, Math.min(limit, 500));
+        PostgresQueries pg = pgQueries.getIfAvailable();
+        if (pg != null) {
+            try {
+                var rows = pg.orders(acct, b, n);
+                return new Page<>("postgres", rows, rows.size() < n ? null : rows.get(rows.size() - 1).orderId());
+            } catch (RuntimeException e) {
+                // database unavailable: fall through to the in-memory window
+            }
+        }
+        AccountState a = readModel.account(acct);
+        var rows = a == null ? List.<AccountState.OrderView>of()
+                : a.history(300).stream().filter(o -> o.orderId() < b).limit(n).toList();
+        return new Page<>("memory", rows, rows.size() < n ? null : rows.get(rows.size() - 1).orderId());
+    }
+
     // ------------------------------------------------------------------ trading
 
     @PostMapping("/orders")
@@ -137,6 +199,16 @@ public class ApiController {
                 ? ResponseEntity.ok(Map.of("orderId", orderId, "status", "CANCELED"))
                 : ResponseEntity.status(rejection.equals("UNKNOWN_ORDER") ? 404 : 403)
                         .body(Map.of("orderId", orderId, "error", rejection)));
+    }
+
+    /** Cancel by the client-assigned id, safe even while the original order is still in flight. */
+    @DeleteMapping("/orders/client/{clientOrderId}")
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> cancelByClientId(
+            @RequestHeader(value = "Authorization", required = false) String authz, @PathVariable long clientOrderId) {
+        return orders.cancelByClientId(account(authz), clientOrderId).thenApply(rejection -> rejection == null
+                ? ResponseEntity.ok(Map.of("clientOrderId", clientOrderId, "status", "CANCELED"))
+                : ResponseEntity.status(rejection.equals("UNKNOWN_ORDER") ? 404 : 403)
+                        .body(Map.of("clientOrderId", clientOrderId, "error", rejection)));
     }
 
     /** Cancel all of my open orders, optionally in one market. */
@@ -192,6 +264,21 @@ public class ApiController {
         m.put("recovery", Map.of("sequence", engine.recoveredSequence(), "replayedCommands", engine.replayedOnStart()));
         m.put("websocketClients", hub.clientCount());
         m.put("polymarket", polymarket.stats());
+        var snap = engine.snapshots();
+        m.put("snapshots", snap == null ? Map.of("mode", "INLINE")
+                : Map.of("mode", "FOLLOWER", "followerSequence", snap.position(), "lastSnapshotSequence",
+                        snap.lastSnapshotSequence(), "lastSnapshotMillis", snap.lastSnapshotMillis(),
+                        "taken", snap.snapshotsTaken()));
+        PostgresProjector pg = pgProjector.getIfAvailable();
+        if (pg != null) {
+            var st = pg.status();
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("status", st);
+            p.put("lag", Math.max(0, r.durableSequence() - st.offset()));
+            m.put("postgres", p);
+        }
+        ClickHouseAnalytics ch = clickhouse.getIfAvailable();
+        if (ch != null) m.put("clickhouse", ch.status());
         return m;
     }
 

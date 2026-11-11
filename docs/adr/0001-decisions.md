@@ -30,3 +30,18 @@ Each decision records its context, the choice made, and the trade-off accepted.
 - **Context:** v1 journaled on the matching thread, which put syscall latency in series with matching.
 - **Decision:** A broadcast ring with two consumers: the journaler and the matcher. Outputs are released only when `durable ≥ seq`.
 - **Trade-off:** The matcher may run ahead of durability, so the outbound path must stage events per sequence. In exchange, matching never blocks on I/O and throughput rose 16%.
+
+## ADR-0007: Databases are projections, written exactly once, never on the critical path
+- **Context:** History, leaderboards and analytics need real databases, but a database stall must never slow matching, and a database outage must never stop trading.
+- **Decision:** Postgres and ClickHouse are fed by `EngineHost.Sink`s from the durable event stream. The publisher only does a non-blocking `offer` into a bounded queue; a writer thread per database drains it in batches. Postgres stores each batch and its last journal sequence in **one transaction** (`projection_offset`), skips anything at or below that offset, and after any failure re-reads the offset from the database before retrying. That gives exactly-once results even when a COMMIT's outcome is unknown. On restart, the engine's journal-tail replay is offered to the sinks, which skip what they already have.
+- **Trade-off:** Projections lag the engine by a batch (milliseconds in practice; `/api/system` shows the lag). If Postgres is down longer than the ~1M-command buffer *and* the journal has since been compacted, the missing range is recorded in `projection_gaps`, not hidden. ClickHouse has no multi-statement transactions, so it uses idempotent storage instead (`ReplacingMergeTree` keyed by trade id, queries with `FINAL`).
+
+## ADR-0008: Postgres for state, ClickHouse for analytics
+- **Context:** Two different query shapes. "My last 50 fills" is a point lookup that must be exact and current. "VWAP, volatility and spread per 5 minutes for a week" scans millions of rows but touches 3–4 columns.
+- **Decision:** Postgres holds orders, fills, positions and balances, with keyset-paginated history and narrow composite indexes (including a two-index `UNION ALL` for "fills where I am maker *or* taker"). ClickHouse holds trades and 1 Hz book samples, and analytics aggregate there. Only result rows cross the network. An in-memory 24 h minute-bucket store answers the same API when ClickHouse is off, and every response names its `source`.
+- **Trade-off:** Two databases to operate. Docker Compose hides that locally; both are optional at runtime.
+
+## ADR-0009: Snapshots by a follower engine
+- **Context:** An inline snapshot serializes all engine state on the matcher thread. With ~1M resting orders that is a pause of tens to hundreds of milliseconds for every order queued behind it.
+- **Decision:** A second, private engine (`SnapshotFollower`) tails the journal with `JournalTailer`, applies commands up to the durable sequence, and snapshots its own copy; it also prunes old snapshots and compacts journal segments it has fully passed. Correctness rests on determinism, the same property recovery already depends on, and is tested by digest equality.
+- **Trade-off:** A second copy of engine state in memory and a mostly idle core. Inline mode is still available (`tradevision.snapshot-mode=INLINE`).

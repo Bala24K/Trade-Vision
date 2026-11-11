@@ -6,6 +6,8 @@ import io.tradevision.engine.Prices;
 import io.tradevision.engine.TimeInForce;
 import io.tradevision.gateway.engine.EngineHost;
 import io.tradevision.gateway.engine.Event;
+import io.tradevision.gateway.read.AccountState;
+import io.tradevision.gateway.read.ReadModel;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -31,6 +33,7 @@ public class OrderService {
                               long avgPriceMilli, String reason, List<FillDto> fills) {}
 
     private final EngineHost engine;
+    private final ReadModel readModel;
     private final Map<String, CompletableFuture<OrderResult>> recent = new LinkedHashMap<>(1024, 0.75f, false) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, CompletableFuture<OrderResult>> e) {
@@ -38,8 +41,9 @@ public class OrderService {
         }
     };
 
-    public OrderService(EngineHost engine) {
+    public OrderService(EngineHost engine, ReadModel readModel) {
         this.engine = engine;
+        this.readModel = readModel;
     }
 
     public CompletableFuture<OrderResult> place(long accountId, PlaceOrder req) {
@@ -107,6 +111,27 @@ public class OrderService {
             }
             return null;
         });
+    }
+
+    /**
+     * Cancel by the client's own order id. Clients know this id the moment they send an order, before the
+     * exchange has assigned an order id, so a "cancel" can race the "place". If that place is still in flight
+     * we wait for its (durable) result and then cancel the engine order it created: the cancel is never lost and
+     * never hits the wrong order.
+     */
+    public CompletableFuture<String> cancelByClientId(long accountId, long clientOrderId) {
+        CompletableFuture<OrderResult> inflight;
+        synchronized (recent) {
+            inflight = recent.get(accountId + ":" + clientOrderId);
+        }
+        CompletableFuture<Long> orderId;
+        if (inflight != null) {
+            orderId = inflight.thenApply(OrderResult::orderId);
+        } else {
+            AccountState a = readModel.account(accountId);
+            orderId = CompletableFuture.completedFuture(a == null ? -1 : a.openOrderIdByClientId(clientOrderId));
+        }
+        return orderId.thenCompose(id -> id < 0 ? CompletableFuture.completedFuture("UNKNOWN_ORDER") : cancel(accountId, id));
     }
 
     private static <E extends Enum<E>> E parse(Class<E> type, String value, String field) {

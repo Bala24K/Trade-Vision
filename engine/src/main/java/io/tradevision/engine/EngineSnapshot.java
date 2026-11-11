@@ -214,13 +214,46 @@ public final class EngineSnapshot {
         if (engine == null) engine = new MatchingEngine(replayListener);
         final MatchingEngine target = engine;
         long[] last = {snapSeq};
+        // A sequenced replay listener also sees command boundaries, so downstream projections (Postgres,
+        // ClickHouse) can catch up on the journal tail with exact sequence numbers.
+        final io.tradevision.engine.runtime.SequencedListener seq =
+                replayListener instanceof io.tradevision.engine.runtime.SequencedListener sl ? sl : null;
         long replayed = Journal.replay(journalDir, snapSeq, c -> {
             if (c.sequence != last[0] + 1) throw new IllegalStateException("journal gap at " + c.sequence + " after " + last[0]);
+            if (seq != null) seq.onCommandStart(c);
             c.applyTo(target);
+            if (seq != null) seq.onCommandEnd(c);
             last[0] = c.sequence;
         });
         engine.setListener(liveListener);
         return new Recovered(engine, snapSeq, last[0], replayed);
+    }
+
+    public record Loaded(MatchingEngine engine, long sequence) {}
+
+    /** Newest snapshot whose CRC validates, without touching the journal. Empty if there is none. */
+    public static Optional<Loaded> loadLatest(Path snapshotDir, EngineListener listener) {
+        for (Path snap : snapshots(snapshotDir)) {
+            long[] seq = new long[1];
+            Optional<MatchingEngine> e = read(snap, listener, seq);
+            if (e.isPresent()) return Optional.of(new Loaded(e.get(), seq[0]));
+        }
+        return Optional.empty();
+    }
+
+    /** Delete all but the newest {@code keep} snapshots. Keeping two leaves a fallback if the newest is corrupt. */
+    public static int prune(Path snapshotDir, int keep) {
+        List<Path> all = snapshots(snapshotDir);
+        int deleted = 0;
+        for (int i = keep; i < all.size(); i++) {
+            try {
+                Files.deleteIfExists(all.get(i));
+                deleted++;
+            } catch (IOException ex) {
+                throw new UncheckedIOException(ex);
+            }
+        }
+        return deleted;
     }
 
     /** Snapshot files, newest first. */

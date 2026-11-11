@@ -210,6 +210,7 @@ public final class EngineRunner {
      */
     private void snapshot(long seq) {
         EngineSnapshot.write(engine, seq, snapshotDir);
+        EngineSnapshot.prune(snapshotDir, 2);
         if (durable.getAcquire() >= seq) Journal.compact(journalDir, seq);
         lastSnapshotSequence = seq;
     }

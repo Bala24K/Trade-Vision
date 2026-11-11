@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
+import { mergeNewestFirst, normalizeOrder } from '../lib/analytics';
+import type { Fill, OrderView } from '../lib/types';
 import { refresher } from '../lib/account';
 import { c1, cents, pnlClass, qty, timeOf, usd } from '../lib/format';
 import { useAccount, useMarkets, useUi } from '../stores/stores';
@@ -60,6 +62,14 @@ function OpenOrders() {
       toast('err', `Cancel failed: ${(e as Error).message}`);
     }
   };
+  const cancelPending = async (clientOrderId: number) => {
+    try {
+      await api.cancelByClientId(clientOrderId);
+      refresher.now();
+    } catch (e) {
+      toast('err', `Cancel failed: ${(e as Error).message}`);
+    }
+  };
   return (
     <>
       <div className="tr th" style={cols}><span>Market</span><span>Order</span><span className="r">Price</span><span className="r">Filled</span><span className="r">Status</span><span className="r">Time</span><span /></div>
@@ -71,7 +81,7 @@ function OpenOrders() {
           <span className="r">0/{qty(p.quantity)}</span>
           <span className="r">sending…</span>
           <span className="r">—</span>
-          <span />
+          <span className="r"><button className="x" onClick={() => cancelPending(p.key)} aria-label="Cancel order" title="Cancel by client order id (works before the exchange acknowledges)">✕</button></span>
         </div>
       ))}
       {orders.map((o) => (
@@ -89,8 +99,40 @@ function OpenOrders() {
   );
 }
 
+/** Older pages fetched on demand (keyset pagination: "rows before id X"), merged under the live list. */
+function useOlder<T>(load: (before?: number) => Promise<{ source: string; items: T[]; next: number | null }>, key: (t: T) => number) {
+  const [older, setOlder] = useState<T[]>([]);
+  const [next, setNext] = useState<number | null | undefined>(undefined);
+  const [source, setSource] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const more = async (oldestShown: number | undefined) => {
+    setBusy(true);
+    try {
+      const page = await load(next ?? oldestShown);
+      setOlder((o) => mergeNewestFirst(o, page.items, key));
+      setNext(page.next);
+      setSource(page.source);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { older, more, done: next === null, busy, source };
+}
+
+function LoadMore({ onClick, done, busy, source }: { onClick: () => void; done: boolean; busy: boolean; source: string | null }) {
+  return (
+    <div className="more">
+      {done ? <span className="dim">End of history{source ? ` · ${source}` : ''}</span>
+        : <button className="x" disabled={busy} onClick={onClick}>{busy ? 'Loading…' : 'Load older'}</button>}
+      {!done && source && <span className="dim"> · from {source}</span>}
+    </div>
+  );
+}
+
 function History() {
-  const history = useAccount((s) => s.history);
+  const live = useAccount((s) => s.history);
+  const o = useOlder((before) => api.orderPage(before).then((p) => ({ ...p, items: p.items.map(normalizeOrder) })), (x: OrderView) => x.orderId);
+  const history = mergeNewestFirst(live, o.older, (x) => x.orderId);
   const cols = { gridTemplateColumns: 'minmax(160px,1fr) 90px 70px 90px 90px 130px 80px' };
   if (!history.length) return <div className="empty">No order history yet</div>;
   return (
@@ -107,12 +149,15 @@ function History() {
           <span className="r dim">{timeOf(o.updatedTs)}</span>
         </div>
       ))}
+      <LoadMore onClick={() => o.more(history[history.length - 1]?.orderId)} done={o.done} busy={o.busy} source={o.source} />
     </>
   );
 }
 
 function Fills() {
-  const fills = useAccount((s) => s.fills);
+  const live = useAccount((s) => s.fills);
+  const o = useOlder((before) => api.fillPage(before), (x: Fill) => x.tradeId * 2 + (x.maker ? 1 : 0));
+  const fills = mergeNewestFirst(live, o.older, (x) => x.tradeId * 2 + (x.maker ? 1 : 0));
   const cols = { gridTemplateColumns: 'minmax(160px,1fr) 90px 80px 80px 70px 80px' };
   if (!fills.length) return <div className="empty">No fills yet</div>;
   return (
@@ -128,6 +173,7 @@ function Fills() {
           <span className="r dim">{timeOf(f.ts)}</span>
         </div>
       ))}
+      <LoadMore onClick={() => o.more(fills[fills.length - 1]?.tradeId)} done={o.done} busy={o.busy} source={o.source} />
     </>
   );
 }

@@ -12,9 +12,12 @@ import { OrderTicket } from './components/OrderTicket';
 import { AccountTabs } from './components/AccountTabs';
 import { Toasts } from './components/Toasts';
 import { useShortcuts } from './components/useShortcuts';
+import { AnalyticsView } from './components/AnalyticsView';
+import { LeaderboardView } from './components/LeaderboardView';
 
 export function App() {
   const selected = useUi((s) => s.selected);
+  const view = useUi((s) => s.view);
   const started = useRef(false);
   useShortcuts();
 
@@ -44,6 +47,16 @@ export function App() {
   useEffect(() => {
     if (selected != null) feed.focus(selected);
   }, [selected]);
+
+  if (view !== 'trade') {
+    return (
+      <div className="app">
+        <TopBar />
+        {view === 'analytics' ? <AnalyticsView /> : <LeaderboardView />}
+        <Toasts />
+      </div>
+    );
+  }
 
   return (
     <div className="app">

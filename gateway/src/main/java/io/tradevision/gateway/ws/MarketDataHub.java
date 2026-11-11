@@ -98,7 +98,7 @@ public class MarketDataHub extends TextWebSocketHandler implements EngineHost.Si
     // ------------------------------------------------------------------ publisher thread
 
     @Override
-    public void onEvents(List<Event> events) {
+    public void onEvents(long sequence, List<Event> events) {
         Set<Long> accountsTouched = null;
         for (Event ev : events) {
             switch (ev) {

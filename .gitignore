@@ -8,3 +8,7 @@ data/
 *.log
 .env
 gateway/src/main/resources/static/
+
+# build artifacts
+*.tsbuildinfo
+dependency-reduced-pom.xml

@@ -1,13 +1,11 @@
 package io.tradevision.gateway.engine;
 
 import io.tradevision.engine.Command;
-import io.tradevision.engine.EngineListener;
 import io.tradevision.engine.EngineSnapshot;
-import io.tradevision.engine.Market;
 import io.tradevision.engine.MatchingEngine;
-import io.tradevision.engine.book.Order;
 import io.tradevision.engine.journal.Journal;
 import io.tradevision.engine.runtime.EngineRunner;
+import io.tradevision.engine.runtime.SnapshotFollower;
 import io.tradevision.gateway.TvProperties;
 import io.tradevision.gateway.read.ReadModel;
 import org.slf4j.Logger;
@@ -41,9 +39,19 @@ import java.util.function.Consumer;
 public class EngineHost implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(EngineHost.class);
 
-    /** Downstream consumer of durable events (WebSocket hub, future Postgres projector...). Called on the publisher thread. */
+    /**
+     * Downstream consumer of durable events (WebSocket hub, Postgres and ClickHouse projectors). Called on the
+     * publisher thread, in sequence order, once per command. Implementations must not block.
+     */
     public interface Sink {
-        void onEvents(List<Event> events);
+        void onEvents(long sequence, List<Event> events);
+
+        /**
+         * Events re-derived from the journal tail during startup recovery. They were already published before the
+         * restart, so live clients must not see them again, but an idempotent projection uses them to catch up
+         * on anything it had not stored yet.
+         */
+        default void onReplay(long sequence, List<Event> events) {}
     }
 
     public static final class OverloadedException extends RuntimeException {
@@ -65,6 +73,7 @@ public class EngineHost implements SmartLifecycle {
     private volatile boolean running;
     private volatile boolean publisherParked;
     private EngineRunner runner;
+    private SnapshotFollower snapshots;
     private volatile Thread publisher;
     private long maxAccountId;
     private long recoveredSequence, replayed;
@@ -84,13 +93,12 @@ public class EngineHost implements SmartLifecycle {
         Path journalDir = data.resolve("journal"), snapDir = data.resolve("snapshots");
         long t0 = System.nanoTime();
 
-        // Replay rebuilds trade history for charts; full state is then seeded straight from the recovered engine.
-        EngineListener replay = new EngineListener() {
-            @Override
-            public void onTrade(long id, Market m, int price, long qty, Order maker, Order taker, long ts) {
-                readModel.replayTrade(EventTranslator.trade(id, m, price, qty, maker, taker, ts));
-            }
-        };
+        // Replay rebuilds trade history for charts and lets projections catch up; full read-model state is then
+        // seeded straight from the recovered engine.
+        var replay = new EventTranslator((seq, corr, events) -> {
+            for (Event e : events) if (e instanceof Event.Trade t) readModel.replayTrade(t);
+            for (Sink s : sinks) s.onReplay(seq, events);
+        });
         var translator = new EventTranslator((seq, corr, events) -> {
             outbound.offer(new Outcome(seq, corr, events));
             outboundDepth.incrementAndGet();
@@ -108,8 +116,10 @@ public class EngineHost implements SmartLifecycle {
             throw new IllegalStateException("journal at " + journal.lastSequence() + " but recovery reached " + rec.lastSequence());
         }
         if (props.busySpin()) System.setProperty("tv.busySpin", "true");
+        boolean follower = !"INLINE".equalsIgnoreCase(props.snapshotMode());
         runner = new EngineRunner(engine, journal, translator, () -> System.currentTimeMillis() * 1000, journalDir, snapDir,
-                props.snapshotEvery(), 1 << 16, 4096).start();
+                follower ? 0 : props.snapshotEvery(), 1 << 16, 4096).start();
+        if (follower) snapshots = new SnapshotFollower(snapDir, journalDir, runner::durableSequence, props.snapshotEvery()).start();
         running = true;
         publisher = Thread.ofPlatform().name("tv-publisher").start(this::publishLoop);
         log.info("engine up: snapshot@{} + replayed {} commands -> seq {} in {} ms ({} markets, {} accounts)",
@@ -146,7 +156,7 @@ public class EngineHost implements SmartLifecycle {
                     CompletableFuture<List<Event>> f = pending.remove(o.correlation());
                     if (f != null) f.complete(o.events());
                 }
-                for (Sink s : sinks) s.onEvents(o.events());
+                for (Sink s : sinks) s.onEvents(o.sequence(), o.events());
             } catch (RuntimeException e) {
                 log.error("publisher failed on seq {}", o.sequence(), e);
             }
@@ -181,6 +191,7 @@ public class EngineHost implements SmartLifecycle {
     public void stop() {
         try {
             if (runner != null) runner.stop();
+            if (snapshots != null) snapshots.stop();
             running = false;
             if (publisher != null) publisher.join(5_000);
         } catch (InterruptedException e) {
@@ -200,6 +211,8 @@ public class EngineHost implements SmartLifecycle {
     }
 
     public EngineRunner runner() { return runner; }
+    /** Background snapshotter, or null when snapshots are taken inline on the matcher thread. */
+    public SnapshotFollower snapshots() { return snapshots; }
     public long outboundDepth() { return outboundDepth.get(); }
     public long recoveredSequence() { return recoveredSequence; }
     public long replayedOnStart() { return replayed; }

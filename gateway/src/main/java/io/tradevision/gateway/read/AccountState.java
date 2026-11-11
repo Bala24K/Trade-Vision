@@ -123,6 +123,12 @@ public final class AccountState {
         return new ArrayList<>(settlements);
     }
 
+    /** Engine order id of an open order by the client's own id, or -1. */
+    public synchronized long openOrderIdByClientId(long clientOrderId) {
+        for (OrderView o : open.values()) if (o.clientOrderId() == clientOrderId) return o.orderId();
+        return -1;
+    }
+
     public synchronized long available() {
         return available;
     }

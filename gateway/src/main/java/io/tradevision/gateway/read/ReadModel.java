@@ -26,6 +26,7 @@ public class ReadModel {
     public MarketState market(long id) { return markets.get(id); }
     public AccountState account(long id) { return accounts.get(id); }
     public Collection<MarketState> markets() { return markets.values(); }
+    public Collection<AccountState> accounts() { return accounts.values(); }
 
     private MarketState marketOrCreate(long id) { return markets.computeIfAbsent(id, MarketState::new); }
     private AccountState accountOrCreate(long id) { return accounts.computeIfAbsent(id, AccountState::new); }

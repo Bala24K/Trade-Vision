@@ -7,6 +7,7 @@ import { useMarkets, useUi } from '../stores/stores';
  * Keyboard-first trading. Ignored while typing in an input (except Esc).
  *   Y / N   outcome        B / S   buy / sell        P   focus price     Q   focus quantity
  *   J / K   next / previous market                    Esc cancel all my orders in this market
+ *   Alt+T / Alt+A / Alt+L   Trade / Analytics / Leaderboard view
  */
 export function useShortcuts() {
   useEffect(() => {
@@ -18,7 +19,7 @@ export function useShortcuts() {
           (e.target as HTMLElement).blur();
           return;
         }
-        if (ui.selected != null) {
+        if (ui.selected != null && ui.view === 'trade') {
           api.cancelAll(ui.selected).then(() => {
             ui.toast('info', 'Cancelled all your orders in this market');
             refresher.now();
@@ -26,7 +27,15 @@ export function useShortcuts() {
         }
         return;
       }
-      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.altKey && !typing) {
+        const v = ({ t: 'trade', a: 'analytics', l: 'leaderboard' } as const)[e.key.toLowerCase() as 't' | 'a' | 'l'];
+        if (v) {
+          e.preventDefault();
+          ui.setView(v);
+        }
+        return;
+      }
+      if (typing || e.metaKey || e.ctrlKey || ui.view !== 'trade') return;
       const order = useMarkets.getState().order;
       switch (e.key.toLowerCase()) {
         case 'y': ui.setTicket({ ticketOutcome: 'YES', ticketPrice: '' }); break;

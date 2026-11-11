@@ -18,6 +18,8 @@ java -Xms2g -Xmx2g -XX:+UseZGC -Dtv.busySpin=true -Dtv.presize=4194304 \
 | Saturated throughput (4 producers → ring → journaler ‖ matcher) | **~2.7 M commands/s** |
 | Matching cost per command (`apply`), saturated | **p50 203 ns · p99 0.8–1.4 µs** |
 | Ingress → applied at 200k cmd/s (tuned) | **p50 < 1 µs · p99 46–67 µs · p99.9 ≈ 4.6 ms** |
+| Same, with periodic snapshots: inline vs follower engine | **p99 528 ms → 54–104 µs**, 0 rejected orders |
+| Linux container (8 pinned cores) | 2.05 M cmd/s saturated · p99 83–110 µs paced |
 | Ingress → durable, OS page cache | p50 3 µs · p99 14 µs |
 | Ingress → durable, `fsync` every batch | p50 0.7 ms · p99 2.8 ms (disk-bound, ~167 cmds share one fsync) |
 
@@ -70,10 +72,9 @@ cancels miss). The open-order index doubles from 65k → 2M slots along the way,
 stop-the-world rehash on the engine thread (≈ 25–30 ms at 1M entries). Pre-sizing removed it: max stall 30 ms → 4 ms,
 p99 311 µs → 46 µs. Production rule: size engine tables for peak, never grow on the hot path.
 
-**What is left (p99.9 ≈ 4–7 ms):** most likely OS preemption on a non-isolated desktop (4 producers + 2 spinning
-consumers sharing cores with the IDE/browser). Next steps, in order: run on Linux with `isolcpus` + thread affinity,
-pin the matcher and journaler, `-XX:+UseTransparentHugePages`, then re-measure. Not attempted yet because every
-number above would change and the comparison must be on equal hardware.
+**What is left (p99.9 ≈ 4–7 ms):** most likely OS/VM preemption on a non-isolated machine. Step 8 re-measured on
+Linux (a WSL2 container) and saw the same tail, which rules out the Windows timer as the cause. The next experiment
+needs bare-metal Linux: `isolcpus` + thread affinity for matcher and journaler, `-XX:+UseTransparentHugePages`.
 
 ## Step 6: the same bug, opposite regime (found on the running server)
 
@@ -87,6 +88,55 @@ lost-wakeup window (Dekker-style StoreLoad ordering).
 |---|---|---|
 | ingress → applied p50 / p99 | 15.5 ms / 16.3 ms | **4 µs / 303 µs** |
 | ingress → durable p50 | 15.5 ms | **7 µs** |
+
+## Step 7: snapshots off the matching thread (follower engine)
+
+Inline snapshots serialize all engine state on the matcher. In the paced harness about 1M orders are resting by the
+end, so each snapshot takes **~680 ms**, and every order arriving meanwhile waits or, once the 65k-slot ring is full,
+is rejected with "overloaded". `SnapshotFollower` replays the journal into a private engine copy and snapshots *that*
+(ADR-0009).
+
+Paced 200k cmd/s for 15 s, snapshot every 500k commands, busy-spin, ZGC, two runs each:
+
+| | inline (matcher pauses) | follower (background) |
+|---|---|---|
+| ingress → applied p99 | **528 ms / 495 ms** | **104 µs / 54 µs** |
+| ingress → applied max | 621 ms / 587 ms | 38 ms / 9 ms |
+| orders rejected by backpressure | **115,638 / 99,421** | **0 / 0** |
+| snapshot duration | ~680 ms each (on the matcher) | 672–685 ms each (off it) |
+
+Same snapshot cost, but it moved to a thread nobody waits on. Reproduce with `-Dtv.snapshot=inline|follower`.
+
+## Step 8: wake-on-submit also fixes the high-load case; Linux re-measure
+
+Step 2 found that parking on Windows oversleeps by milliseconds, and busy-spin was the fix. Step 6 then added
+wake-on-submit for low load. Re-running the paced 200k cmd/s test shows it also removes the reason to busy-spin at
+high load:
+
+| ingress → applied, paced 200k cmd/s | p99 | p99.9 |
+|---|---|---|
+| Windows, back-off idle **before** wake-on-submit (step 1) | 7.1 ms | 14.4 ms |
+| Windows, busy-spin (step 4) | 46 µs | 6.7 ms |
+| Windows, back-off idle **with** wake-on-submit | **51 µs** | 3.2 ms |
+| Windows, busy-spin with wake-on-submit | 61 µs | 11.5 ms |
+| Linux container (WSL2 kernel 6.6), 8 pinned cores, back-off, 2 runs | 94 / 83 µs | 6.9 / 5.4 ms |
+| Linux container, 8 pinned cores, busy-spin, 2 runs | 86 / 110 µs | 5.1 / 7.6 ms |
+
+| Saturated, 5M commands | throughput | match p50 / p99 |
+|---|---|---|
+| Windows host, 16 threads | 2.47 M cmd/s | 203 ns / 1.8 µs |
+| Linux container, 8 pinned cores | 2.05 M cmd/s | 183 ns / 2.2 µs |
+
+**What this settles:** the default (back-off + wake-on-submit) is now as good as burning a core, so busy-spin stays
+an opt-in. **What it does not settle:** the 3–7 ms p99.9 appears on Linux too, so it is not the Windows timer. WSL2
+is itself a Hyper-V VM, so `isolcpus` and thread affinity cannot be tested here. That still needs bare-metal Linux.
+
+## Projection throughput
+
+`PostgresProjectorTest` projects a 19,604-command random workload (1,955 trades, ~9k orders) into Postgres 16 in a
+container in **2.1 s including Flyway migration and connection setup (~9k commands/s)**, in batches of 1,000
+commands per transaction. The running compose stack shows ~6 ms per batch at bot load, with lag 0. The projection
+is off the critical path, so its throughput bounds only how far it can fall behind, not trading.
 
 ## Correctness guards on the fast path
 

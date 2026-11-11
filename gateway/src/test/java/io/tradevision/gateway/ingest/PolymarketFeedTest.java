@@ -19,8 +19,9 @@ class PolymarketFeedTest {
     static final String TOKEN = "123";
 
     PolymarketFeed feed() {
-        var props = new TvProperties(tmp.toString(), Journal.SyncPolicy.OS_CACHE, 0, false, "x", 0,
-                new TvProperties.Bots(false), new TvProperties.Polymarket(true, 0, "http://invalid", "ws://invalid"));
+        var props = new TvProperties(tmp.toString(), Journal.SyncPolicy.OS_CACHE, 0, "INLINE", false, "x", 0,
+                new TvProperties.Bots(false), new TvProperties.Polymarket(true, 0, "http://invalid", "ws://invalid"),
+                null, null);
         var f = new PolymarketFeed(props, new MarketCatalog(props, new ObjectMapper()), new ObjectMapper());
         f.bookFor(TOKEN);
         return f;

@@ -31,8 +31,12 @@ POST /api/orders ─▶ OrderService (validate, idempotency key) ─▶ EngineHo
 | `GET /api/me`, `/api/me/orders?status=open\|history`, `/api/me/fills` | portfolio with mark-to-market PnL, orders, fills |
 | `POST /api/orders` | `{marketId, outcome: YES\|NO, side: BUY\|SELL, type: LIMIT\|MARKET, price (ticks), quantity, tif, clientOrderId}` |
 | `DELETE /api/orders/{id}`, `DELETE /api/orders?marketId=` | cancel one, cancel all |
+| `DELETE /api/orders/client/{clientOrderId}` | cancel by the client's own id; if that order is still in flight, waits for its durable result, then cancels it |
+| `GET /api/me/history/fills?before=&limit=`, `/api/me/history/orders?before=&limit=` | full history, keyset-paginated (Postgres; falls back to the in-memory window) |
+| `GET /api/analytics/markets/{id}?window=60` | VWAP, realized vol, flow, spread, imbalance, Polymarket basis + buckets (ClickHouse or memory) |
+| `GET /api/analytics/scanner`, `/api/analytics/leaderboard?bots=false` | last-hour metrics for every market; PnL leaderboard (Postgres or memory) |
 | `POST /api/admin/markets/{id}/halt\|reopen\|resolve?winner=YES` | admin, `X-Admin-Token` header |
-| `GET /api/system` | throughput, latency percentiles, queue depths, recovery and ingestion stats |
+| `GET /api/system` | throughput, latency percentiles, queue depths, recovery, ingestion, snapshot follower, projection lag/status |
 
 ## WebSocket protocol (`/ws`)
 

@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  engine:
+  backend:
+    name: engine + gateway (unit, fuzz, recovery, Testcontainers)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,12 +15,14 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Build and test (unit, fuzz, recovery, runtime)
+      # GitHub's Ubuntu runners have Docker, so the Postgres/ClickHouse projection tests run against real databases.
+      - name: Build and test
         run: mvn -B verify
       - name: Smoke load test (throughput regression signal)
         run: java -Xms1g -Xmx1g -cp bench/target/benchmarks.jar io.tradevision.bench.LoadHarness saturate 1000000
 
   frontend:
+    name: terminal (typecheck, tests, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,3 +38,33 @@ jobs:
       - run: npx tsc -b --noEmit
       - run: npx vitest run
       - run: npm run build
+
+  compose:
+    name: docker compose up (end-to-end smoke)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the full stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+      - name: Trade over HTTP and check both projections
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do curl -fs localhost:8080/api/markets > /dev/null && break; sleep 2; done
+          TOKEN=$(curl -fs -X POST localhost:8080/api/session | jq -r .token)
+          M=$(curl -fs localhost:8080/api/markets | jq '.[0].id')
+          curl -fs -X POST localhost:8080/api/orders -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+               -d "{\"marketId\":$M,\"outcome\":\"YES\",\"side\":\"BUY\",\"type\":\"MARKET\",\"quantity\":5,\"clientOrderId\":1}" | jq .
+          for i in $(seq 1 30); do
+            S=$(curl -fs localhost:8080/api/system)
+            [ "$(echo "$S" | jq -r .postgres.status.state)" = UP ] && [ "$(echo "$S" | jq -r .clickhouse.up)" = true ] && break
+            sleep 2
+          done
+          echo "$S" | jq '{postgres, clickhouse, snapshots}'
+          test "$(echo "$S" | jq -r .postgres.status.state)" = UP
+          test "$(echo "$S" | jq -r .clickhouse.up)" = true
+          curl -fs "localhost:8080/api/me/history/fills" -H "Authorization: Bearer $TOKEN" | jq -e '.source == "postgres"'
+          curl -fs "localhost:8080/api/analytics/markets/$M?window=60" | jq -e '.source == "clickhouse"'
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 200

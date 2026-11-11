@@ -1,4 +1,7 @@
-import type { Candle, Fill, MarketSummary, OrderResult, OrderView, Portfolio, SystemStats, TapeEntry } from './types';
+import type {
+  Candle, Fill, Leaderboard, MarketAnalytics, MarketSummary, OrderResult, OrderRow, OrderView, Page, Portfolio, ScannerRow,
+  SystemStats, TapeEntry,
+} from './types';
 
 const TOKEN_KEY = 'tv.token';
 
@@ -88,6 +91,15 @@ export const api = {
     clientOrderId: number;
   }) => req<OrderResult>('/api/orders', { method: 'POST', body: JSON.stringify(body) }),
   cancel: (orderId: number) => req<unknown>(`/api/orders/${orderId}`, { method: 'DELETE' }),
+  /** Cancel by our own id: works even before the exchange has acknowledged the order. */
+  cancelByClientId: (clientOrderId: number) => req<unknown>(`/api/orders/client/${clientOrderId}`, { method: 'DELETE' }),
+  fillPage: (before?: number, limit = 50) =>
+    req<Page<Fill>>(`/api/me/history/fills?limit=${limit}${before != null ? `&before=${before}` : ''}`),
+  orderPage: (before?: number, limit = 50) =>
+    req<Page<OrderRow | OrderView>>(`/api/me/history/orders?limit=${limit}${before != null ? `&before=${before}` : ''}`),
+  analytics: (id: number, windowMinutes: number) => req<MarketAnalytics>(`/api/analytics/markets/${id}?window=${windowMinutes}`),
+  scanner: () => req<ScannerRow[]>('/api/analytics/scanner'),
+  leaderboard: (bots: boolean) => req<Leaderboard>(`/api/analytics/leaderboard?limit=50&bots=${bots}`),
   cancelAll: (marketId?: number) =>
     req<unknown>(`/api/orders${marketId ? `?marketId=${marketId}` : ''}`, { method: 'DELETE' }),
 };

@@ -44,10 +44,17 @@ genuine matching engine, and it also ingests live public prediction-market data 
 |---|---|---|
 | `engine` | **done** | Order book, matching, risk, positions/PnL, invariants, digest, journal, snapshots, recovery, ring buffer, runner, histogram. Zero dependencies. |
 | `bench` | **done** | JMH benchmarks (book vs TreeMap, ring vs ABQ) and an end-to-end load harness. |
-| `gateway` | **done** | Spring Boot: REST + WebSocket API, HMAC sessions, idempotent client order ids, durability-gated publisher, CQRS read models, WS conflation, bots, Polymarket ingestion. See [gateway.md](gateway.md). |
-| `ingestion` | **done** (in gateway) | Polymarket CLOB discovery + WS: normalization, stale/duplicate dropping, crossed-book resync, watchdog, backoff. ClickHouse sink still planned. |
+| `gateway` | **done** | Spring Boot: REST + WebSocket API, HMAC sessions, idempotent client order ids, durability-gated publisher, CQRS read models, WS conflation, bots, Polymarket ingestion, follower-engine snapshots. See [gateway.md](gateway.md). |
+| `ingestion` | **done** (in gateway) | Polymarket CLOB discovery + WS: normalization, stale/duplicate dropping, crossed-book resync, watchdog, backoff. Reference quotes sampled into ClickHouse. |
+| `projections` | **done** (in gateway) | Exactly-once Postgres projection, ClickHouse analytics store, in-memory fallback, analytics + leaderboard + paginated history APIs. See [projections.md](projections.md). |
 | `frontend` | **done** | React + TypeScript + Vite terminal: Zustand stores split by update frequency, Lightweight Charts, virtualized list, WS reconnect/stale/gap handling, honest optimistic orders, keyboard trading. |
 | `native` | experiment | C++20 order book via Java FFM for a measured JVM-vs-native comparison, including SIMD depth aggregation. |
+
+## Snapshots
+
+A `SnapshotFollower` (a second, private engine) tails the journal up to the durable sequence and snapshots its own copy
+every N commands, then prunes old snapshots and compacts journal segments it has fully passed. The live matcher never
+pauses for a snapshot (ADR-0009, benchmarks step 7).
 
 ## Recovery
 
