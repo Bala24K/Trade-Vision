@@ -19,7 +19,21 @@ public final class CommandCodec {
 
     public static final int MAX_BODY = 64;
 
+    /**
+     * Encodes losslessly or not at all. Fixed-width fields (price: 16 bits, quantity: 32 bits) are range-checked
+     * <i>before</i> any byte is written; a value that does not fit throws instead of being cast. A cast used to turn
+     * an order the engine rejected live (e.g. quantity 2^32+5) into a different, valid order on replay (audit C1).
+     * {@code EngineRunner} canonicalizes order fields before publishing, so this is a guard that should never fire.
+     */
     public static void encode(Command c, ByteBuffer out) {
+        if (c.type == CommandType.PLACE_ORDER) {
+            if (c.price < Short.MIN_VALUE || c.price > Short.MAX_VALUE) {
+                throw new IllegalArgumentException("price " + c.price + " does not fit the journal's 16-bit field");
+            }
+            if (c.quantity < Integer.MIN_VALUE || c.quantity > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("quantity " + c.quantity + " does not fit the journal's 32-bit field");
+            }
+        }
         out.put(c.type.code);
         switch (c.type) {
             case PLACE_ORDER -> {
@@ -29,8 +43,8 @@ public final class CommandCodec {
                 out.put((byte) c.outcome.ordinal());
                 out.put((byte) c.action.ordinal());
                 out.put((byte) c.tif.ordinal());
-                out.putShort((short) c.price);
-                out.putInt((int) c.quantity); // MAX_QUANTITY < 2^31
+                out.putShort((short) c.price);  // range-checked above: lossless
+                out.putInt((int) c.quantity);    // range-checked above: lossless
             }
             case CANCEL_ORDER -> {
                 out.putLong(c.accountId);

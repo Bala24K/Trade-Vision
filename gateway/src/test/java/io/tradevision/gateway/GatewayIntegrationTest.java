@@ -59,6 +59,39 @@ class GatewayIntegrationTest {
                 .formatted(market, outcome, side, type, price == null ? "" : "\"price\":" + price + ",", qty, coid);
     }
 
+    /** Audit C1: out-of-range input is refused at the edge with an explicit error, never sent to the engine. */
+    @Test
+    void outOfRangeOrdersAreRejectedBeforeReachingTheEngine() throws Exception {
+        long m = call("GET", "/api/markets", null, null).body().get(0).get("id").asLong();
+        String t = call("POST", "/api/session", null, null).body().get("token").asText();
+        long seqBefore = call("GET", "/api/system", null, null).body().get("durableSequence").asLong();
+
+        record Bad(Integer price, long qty, String error, String field) {}
+        var cases = java.util.List.of(
+                new Bad(500, (1L << 32) + 5, "INVALID_QUANTITY", "quantity"),   // the audit's reproduction
+                new Bad(65_536 + 500, 3, "INVALID_PRICE", "price"),             // the audit's reproduction
+                new Bad(500, 0, "INVALID_QUANTITY", "quantity"),
+                new Bad(500, -5, "INVALID_QUANTITY", "quantity"),
+                new Bad(500, 1_000_000_001L, "INVALID_QUANTITY", "quantity"),
+                new Bad(0, 1, "INVALID_PRICE", "price"),
+                new Bad(1000, 1, "INVALID_PRICE", "price"),
+                new Bad(-1, 1, "INVALID_PRICE", "price"),
+                new Bad(null, 1, "INVALID_PRICE", "price"));
+        long coid = 5_000;
+        for (Bad b : cases) {
+            Res r = call("POST", "/api/orders", t, order(m, "YES", "BUY", "LIMIT", b.price(), b.qty(), coid++));
+            assertEquals(400, r.status(), "price=" + b.price() + " qty=" + b.qty());
+            assertEquals(b.error(), r.body().get("error").asText());
+            assertEquals(b.field(), r.body().get("field").asText());
+        }
+        assertEquals(seqBefore, call("GET", "/api/system", null, null).body().get("durableSequence").asLong(),
+                "no invalid order was journaled");
+
+        // Boundaries are accepted.
+        assertEquals("OPEN", call("POST", "/api/orders", t, order(m, "YES", "BUY", "LIMIT", 1, 1, coid++)).body().get("status").asText());
+        assertEquals(200, call("POST", "/api/orders", t, order(m, "NO", "BUY", "LIMIT", 999, 1, coid++)).status());
+    }
+
     @Test
     void fullTradingFlowOverHttp() throws Exception {
         Res markets = call("GET", "/api/markets", null, null);

@@ -43,6 +43,19 @@ public final class Command {
         return this;
     }
 
+    /**
+     * Replace out-of-range order fields with one canonical invalid value ({@code 0}) that the engine rejects for the
+     * same reason ({@code INVALID_PRICE} / {@code INVALID_QUANTITY}) and that the journal encodes exactly.
+     * Called by the sequencer before a command is published, so the matcher, the journaler and every future replay
+     * all see the identical command. Valid commands are untouched; validity of each field is unchanged, so the
+     * engine's decision and reject reason are the same as for the raw value.
+     */
+    public void canonicalize() {
+        if (type != CommandType.PLACE_ORDER) return;
+        if (price < Prices.MIN_PRICE || price > Prices.MAX_PRICE) price = 0;
+        if (quantity <= 0 || quantity > Prices.MAX_QUANTITY) quantity = 0;
+    }
+
     public Command cancelOrder(long accountId, long orderId) {
         this.type = CommandType.CANCEL_ORDER;
         this.accountId = accountId;

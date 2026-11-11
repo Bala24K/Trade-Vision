@@ -12,6 +12,17 @@ import java.util.concurrent.TimeoutException;
 /** Maps failures to explicit status codes: 400 bad input, 503 backpressure, 504 engine timeout. */
 @RestControllerAdvice
 public class ApiErrors {
+    @ExceptionHandler(ValidationException.class)
+    ResponseEntity<Map<String, String>> invalid(ValidationException e) {
+        return ResponseEntity.badRequest().body(Map.of("error", e.code, "field", e.field, "message", e.getMessage()));
+    }
+
+    /** Submitted but not yet durable when the caller stopped waiting. The command was NOT cancelled. */
+    @ExceptionHandler(EngineHost.OutcomePendingException.class)
+    ResponseEntity<Map<String, String>> pending(EngineHost.OutcomePendingException e) {
+        return ResponseEntity.status(504).body(Map.of("error", "OUTCOME_PENDING", "message", e.getMessage()));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     ResponseEntity<Map<String, String>> badRequest(IllegalArgumentException e) {
         return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
@@ -31,6 +42,8 @@ public class ApiErrors {
     ResponseEntity<Map<String, String>> unwrap(CompletionException e) {
         Throwable c = e.getCause();
         if (c instanceof EngineHost.OverloadedException o) return overloaded(o);
+        if (c instanceof EngineHost.OutcomePendingException p) return pending(p);
+        if (c instanceof ValidationException v) return invalid(v);
         if (c instanceof TimeoutException t) return timeout(t);
         if (c instanceof IllegalArgumentException i) return badRequest(i);
         return ResponseEntity.internalServerError().body(Map.of("error", String.valueOf(c)));

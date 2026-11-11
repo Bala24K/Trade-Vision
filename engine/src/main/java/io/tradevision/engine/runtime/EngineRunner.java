@@ -107,6 +107,7 @@ public final class EngineRunner {
         c.ingressNanos = 0; // slots are reused: never inherit measurement/routing fields from a previous command
         c.sessionId = 0;
         fill.accept(c);
+        c.canonicalize(); // before publish: matcher, journaler and replay must all see the same command (audit C1)
         c.sequence = base + s;
         c.timestamp = clockMicros.getAsLong();
         if (c.ingressNanos == 0) c.ingressNanos = System.nanoTime();

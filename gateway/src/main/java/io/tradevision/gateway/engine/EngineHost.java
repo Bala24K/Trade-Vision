@@ -60,6 +60,19 @@ public class EngineHost implements SmartLifecycle {
         }
     }
 
+    /**
+     * The caller stopped waiting, but the command <b>was submitted</b>: it is in the ring/journal and will execute.
+     * Contrast with {@link OverloadedException}, which guarantees the command was never submitted.
+     */
+    public static final class OutcomePendingException extends RuntimeException {
+        public OutcomePendingException() {
+            super("submitted; the result was not durable before the timeout. The command will still execute: "
+                    + "retry with the same clientOrderId to get its result", null, false, false);
+        }
+    }
+
+    private static final long DEFAULT_TIMEOUT_MS = 5_000;
+
     private record Outcome(long sequence, long correlation, List<Event> events) {}
 
     private final TvProperties props;
@@ -164,10 +177,12 @@ public class EngineHost implements SmartLifecycle {
     }
 
     /**
-     * Submit a command; the future completes with the events it caused once they are durable.
-     * Fails fast with {@link OverloadedException} if the engine's inbound ring is full.
+     * Submit a command and get its <b>outcome</b>: the future completes with the events it caused once they are
+     * durable. It never times out, because every submitted command produces an outcome. It fails immediately with
+     * {@link OverloadedException} only when the ring was full, which means the command was never submitted.
+     * Callers that need a deadline wrap it with {@link #withTimeout}, which leaves this future intact.
      */
-    public CompletableFuture<List<Event>> submit(Consumer<Command> fill) {
+    public CompletableFuture<List<Event>> submitTracked(Consumer<Command> fill) {
         long corr = correlation.incrementAndGet();
         var f = new CompletableFuture<List<Event>>();
         pending.put(corr, f);
@@ -178,9 +193,31 @@ public class EngineHost implements SmartLifecycle {
         if (!ok) {
             pending.remove(corr);
             f.completeExceptionally(new OverloadedException());
-            return f;
         }
-        return f.orTimeout(5, TimeUnit.SECONDS).whenComplete((r, e) -> pending.remove(corr));
+        return f; // removed from `pending` by the publisher when the outcome is released
+    }
+
+    /** {@link #submitTracked} with the default 5 s deadline for the caller. Expiry raises {@link OutcomePendingException}. */
+    public CompletableFuture<List<Event>> submit(Consumer<Command> fill) {
+        return withTimeout(submitTracked(fill), DEFAULT_TIMEOUT_MS);
+    }
+
+    /**
+     * A view of {@code outcome} that fails with {@link OutcomePendingException} after {@code millis}. Expiry only
+     * stops the caller waiting: {@code outcome} itself still completes, so an idempotency cache holding it can answer
+     * a retry with the real result. (Before the audit, the timeout was applied to the shared future itself.)
+     */
+    public static <T> CompletableFuture<T> withTimeout(CompletableFuture<T> outcome, long millis) {
+        var view = new CompletableFuture<T>();
+        outcome.whenComplete((r, e) -> {
+            if (e == null) view.complete(r);
+            else view.completeExceptionally(e instanceof java.util.concurrent.CompletionException ce && ce.getCause() != null ? ce.getCause() : e);
+        });
+        if (!view.isDone()) {
+            CompletableFuture.delayedExecutor(millis, TimeUnit.MILLISECONDS)
+                    .execute(() -> view.completeExceptionally(new OutcomePendingException()));
+        }
+        return view;
     }
 
     public synchronized long allocateAccountId() {
